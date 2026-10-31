@@ -15,3 +15,18 @@ contextBridge.exposeInMainWorld("leadjaWhatsapp", {
 contextBridge.exposeInMainWorld("leadjaShare", {
   open: (value) => ipcRenderer.invoke("lead:share", value),
 });
+
+contextBridge.exposeInMainWorld("leadjaSocial", {
+  state: () => ipcRenderer.invoke("social:state"),
+  saveConfig: (provider, value) => ipcRenderer.invoke("social:save-config", { provider, value }),
+  connect: (provider) => ipcRenderer.invoke("social:connect", provider),
+  disconnect: (accountId) => ipcRenderer.invoke("social:disconnect", accountId),
+  chooseVideo: () => ipcRenderer.invoke("social:choose-video"),
+  chooseCover: () => ipcRenderer.invoke("social:choose-cover"),
+  publish: (value) => ipcRenderer.invoke("social:publish", value),
+  onUpdate: (callback) => {
+    const listener = (_event, value) => callback(value);
+    ipcRenderer.on("social:updated", listener);
+    return () => ipcRenderer.removeListener("social:updated", listener);
+  },
+});

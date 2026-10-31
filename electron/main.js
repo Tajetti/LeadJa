@@ -1,9 +1,11 @@
-import { app, BrowserWindow, ipcMain, ShareMenu, shell, WebContentsView } from "electron";
-import { access } from "node:fs/promises";
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, safeStorage, ShareMenu, shell, WebContentsView } from "electron";
+import { access, stat, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer } from "../server.js";
+import { createSocialService } from "../src/social.js";
 import { isAllowedWhatsAppUrl, toWhatsAppWebUrl } from "./whatsapp.js";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -12,6 +14,7 @@ let localServer;
 let whatsappView;
 let whatsappLoaded = false;
 let whatsappViewReady;
+let socialService;
 
 const whatsappChromeMajor = String(Math.min(Number.parseInt(process.versions.chrome, 10) || 140, 140));
 const whatsappChromeVersion = `${whatsappChromeMajor}.0.0.0`;
@@ -19,6 +22,17 @@ const whatsappUserAgent = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Apple
 
 app.setName("LeadJá");
 app.commandLine.appendSwitch("lang", "pt-BR");
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) app.quit();
+else {
+  app.on("second-instance", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
 
 async function createWindow() {
   if (!localServer) {
@@ -27,7 +41,9 @@ async function createWindow() {
       port: 0,
       dataDir: join(app.getPath("userData"), "data"),
       scraperExecutable,
+      databaseOptions: { protect: protectLocalSecret, reveal: revealLocalSecret },
     });
+    socialService = createSocialService({ database: localServer.database });
   }
 
   mainWindow = new BrowserWindow({
@@ -229,6 +245,160 @@ ipcMain.handle("lead:share", (_event, value = {}) => {
   return { ok: true };
 });
 
+ipcMain.handle("social:state", () => {
+  ensureSocialService();
+  return socialService.state(localServer.url);
+});
+
+ipcMain.handle("social:save-config", (_event, { provider, value } = {}) => {
+  ensureSocialService();
+  return socialService.saveConfig(provider, value || {});
+});
+
+ipcMain.handle("social:connect", async (_event, provider) => {
+  ensureSocialService();
+  const request = socialService.startOAuth(String(provider || ""), localServer.url);
+  const callbackUrl = await openOAuthWindow(request);
+  const result = await socialService.completeOAuth(request.provider, callbackUrl);
+  sendSocialUpdate({ type: "accounts", state: socialService.state(localServer.url) });
+  return result;
+});
+
+ipcMain.handle("social:disconnect", async (_event, accountId) => {
+  ensureSocialService();
+  const result = await socialService.disconnect(String(accountId || ""));
+  sendSocialUpdate({ type: "accounts", state: socialService.state(localServer.url) });
+  return result;
+});
+
+ipcMain.handle("social:choose-video", async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Escolha o vídeo para publicar",
+    properties: ["openFile"],
+    filters: [{ name: "Vídeos", extensions: ["mp4", "mov", "m4v", "webm"] }],
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const path = result.filePaths[0];
+  const info = await stat(path);
+  return { path, name: path.split("/").at(-1), size: info.size };
+});
+
+ipcMain.handle("social:choose-cover", async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Escolha uma capa para o Kwai",
+    properties: ["openFile"],
+    filters: [{ name: "Imagem JPG", extensions: ["jpg", "jpeg"] }],
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const path = result.filePaths[0];
+  return { path, name: path.split("/").at(-1) };
+});
+
+ipcMain.handle("social:publish", async (_event, input = {}) => {
+  ensureSocialService();
+  let generatedCover = "";
+  try {
+    const hasKwai = (input.accountIds || []).some((id) => localServer.database.getSocialAccount(id)?.provider === "kwai");
+    if (hasKwai && !input.coverPath) {
+      generatedCover = await createVideoCover(input.videoPath).catch(() => "");
+      if (generatedCover) input.coverPath = generatedCover;
+    }
+    return await socialService.publish(input, (post) => sendSocialUpdate({ type: "post", post }));
+  } finally {
+    if (generatedCover) await unlink(generatedCover).catch(() => null);
+  }
+});
+
+function ensureSocialService() {
+  if (!socialService || !localServer) throw new Error("O publicador ainda está iniciando.");
+}
+
+function sendSocialUpdate(value) {
+  if (!mainWindow?.isDestroyed()) mainWindow.webContents.send("social:updated", value);
+}
+
+function openOAuthWindow(request) {
+  return new Promise((resolvePromise, reject) => {
+    const authWindow = new BrowserWindow({
+      parent: mainWindow,
+      modal: true,
+      width: 560,
+      height: 760,
+      minWidth: 420,
+      minHeight: 620,
+      title: "Conectar conta",
+      backgroundColor: "#ffffff",
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        partition: "persist:leadja-social-auth",
+      },
+    });
+    let settled = false;
+    const finish = (url) => {
+      if (settled || !isOAuthCallback(url, request.redirectUri)) return false;
+      settled = true;
+      resolvePromise(url);
+      authWindow.destroy();
+      return true;
+    };
+    const inspectNavigation = (event, url) => {
+      if (finish(url)) event.preventDefault();
+    };
+    authWindow.webContents.on("will-redirect", inspectNavigation);
+    authWindow.webContents.on("will-navigate", inspectNavigation);
+    authWindow.webContents.on("did-navigate", (_event, url) => finish(url));
+    authWindow.webContents.setWindowOpenHandler(({ url }) => {
+      authWindow.loadURL(url).catch(() => null);
+      return { action: "deny" };
+    });
+    authWindow.on("closed", () => {
+      if (!settled) reject(new Error("A conexão foi cancelada."));
+    });
+    authWindow.loadURL(request.authUrl).catch((error) => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`Não foi possível abrir a conexão: ${error.message}`));
+      }
+      if (!authWindow.isDestroyed()) authWindow.destroy();
+    });
+  });
+}
+
+function isOAuthCallback(value, expected) {
+  try {
+    const url = new URL(value);
+    const callback = new URL(expected);
+    return url.origin === callback.origin && url.pathname.replace(/\/$/, "") === callback.pathname.replace(/\/$/, "");
+  } catch {
+    return false;
+  }
+}
+
+async function createVideoCover(videoPath) {
+  const thumbnail = await nativeImage.createThumbnailFromPath(String(videoPath), { width: 1080, height: 1920 });
+  if (thumbnail.isEmpty()) throw new Error("Não foi possível criar a capa automaticamente.");
+  const path = join(app.getPath("temp"), `leadja-cover-${randomUUID()}.jpg`);
+  await writeFile(path, thumbnail.toJPEG(90));
+  return path;
+}
+
+function protectLocalSecret(value) {
+  const serialized = JSON.stringify(value || {});
+  if (safeStorage.isEncryptionAvailable()) return `safe:v1:${safeStorage.encryptString(serialized).toString("base64")}`;
+  return `plain:v1:${Buffer.from(serialized).toString("base64")}`;
+}
+
+function revealLocalSecret(value) {
+  const serialized = String(value || "");
+  if (serialized.startsWith("safe:v1:")) return JSON.parse(safeStorage.decryptString(Buffer.from(serialized.slice(8), "base64")));
+  if (serialized.startsWith("plain:v1:")) return JSON.parse(Buffer.from(serialized.slice(9), "base64").toString("utf8"));
+  return JSON.parse(serialized || "{}");
+}
+
 async function findScraperExecutable() {
   const candidates = [
     process.env.LEADJA_SCRAPER_PATH,
@@ -246,10 +416,12 @@ async function findScraperExecutable() {
   return null;
 }
 
-app.whenReady().then(createWindow).catch((error) => {
-  console.error(error);
-  app.quit();
-});
+if (hasSingleInstanceLock) {
+  app.whenReady().then(createWindow).catch((error) => {
+    console.error(error);
+    app.quit();
+  });
+}
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow().catch(console.error);

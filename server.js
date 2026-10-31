@@ -20,7 +20,7 @@ const mime = {
 
 export async function startServer(options = {}) {
   const dataDir = resolve(options.dataDir || join(root, ".leadja"));
-  const database = createDatabase(join(dataDir, "leadja.sqlite"));
+  const database = createDatabase(join(dataDir, "leadja.sqlite"), options.databaseOptions);
   const scraper = createScraper({ dataDir, database, executablePath: options.scraperExecutable });
   const requestedPort = Number(options.port ?? process.env.PORT ?? 4173);
 

@@ -1,6 +1,6 @@
 # LeadJá local
 
-Aplicativo pessoal para macOS que busca negócios no Google Maps, prioriza oportunidades com regras transparentes e acompanha contatos em um CRM local. Não usa IA, não exige login, não depende de Docker na versão desktop e mantém os dados no computador.
+Aplicativo pessoal para macOS que busca negócios no Google Maps, prioriza oportunidades com regras transparentes, acompanha contatos em um CRM local e publica vídeos nas contas sociais conectadas. Não usa IA, não exige uma conta do LeadJá e não depende de Docker na versão desktop.
 
 ## Requisitos
 
@@ -44,7 +44,9 @@ npm test
 
 - No modo navegador: `.leadja/`
 - No aplicativo: `~/Library/Application Support/LeadJá/data/`
-- Nenhum dado é enviado para um backend próprio ou serviço de IA.
+- Leads, configurações e histórico ficam no SQLite local.
+- O LeadJá não possui backend próprio e não envia dados a serviços de IA.
+- Ao usar **Publicações**, somente o vídeo, a descrição e as autorizações necessárias são enviados às redes selecionadas. Segredos e tokens ficam protegidos localmente pelo armazenamento seguro do macOS.
 
 ## Fluxo
 
@@ -53,5 +55,16 @@ npm test
 3. O score usa regras configuráveis como ausência de site próprio, poucas avaliações, nota baixa e presença de telefone.
 4. Abra um lead para ver o recibo do score, gerar a mensagem e atualizar a etapa.
 5. Acompanhe o andamento no quadro **CRM**.
+
+## Publicações sociais
+
+A tela **Publicações** conecta Facebook, Instagram, TikTok e Kwai por meio das APIs oficiais. Cada rede exige que você crie e configure uma aplicação de desenvolvedor antes do primeiro login:
+
+- **Meta:** app Business com Facebook Login, `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`, `instagram_basic` e `instagram_content_publish`.
+- **TikTok:** app Desktop com Login Kit, Content Posting API e `video.publish`. Cadastre `http://127.0.0.1:*/oauth/tiktok` como URL de retorno.
+- **Kwai:** aplicação Web com `user_info` e `user_video_publish`.
+- **Instagram:** além da Meta, configure um bucket público temporário no Supabase Storage. A API do Instagram precisa buscar o vídeo por uma URL pública; o LeadJá envia o arquivo temporário e tenta removê-lo ao final.
+
+Contas, tentativas e resultados por destino aparecem no histórico local. Uma falha em uma rede não apaga a publicação concluída nas outras.
 
 Também é possível importar um CSV pelas telas de leads. Colunas comuns em português e inglês são reconhecidas automaticamente.

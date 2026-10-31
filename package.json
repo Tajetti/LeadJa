@@ -1,7 +1,7 @@
 {
   "name": "leadja-local",
   "productName": "LeadJá",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "type": "module",
   "main": "electron/main.js",

@@ -18,6 +18,9 @@ const icons = {
   arrow: '<svg class="icon" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
   share: '<svg class="icon" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/></svg>',
   download: '<svg class="icon" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 20h14"/></svg>',
+  publish: '<svg class="icon" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/></svg>',
+  video: '<svg class="icon" viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/></svg>',
+  check: '<svg class="icon" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>',
 };
 
 const state = {
@@ -29,6 +32,10 @@ const state = {
   pendingWhatsappUrl: "",
   whatsappObserver: null,
   whatsappStatus: { status: "loading", message: "Conectando ao WhatsApp Web…" },
+  social: { configs: [], accounts: [], posts: [], callbackUrls: {} },
+  socialVideo: null,
+  socialCover: null,
+  socialBusy: "",
 };
 
 const app = document.querySelector("#app");
@@ -58,11 +65,25 @@ window.leadjaWhatsapp?.onStatus(({ status, message }) => {
   label.dataset.status = status;
 });
 
+window.leadjaSocial?.onUpdate((value) => {
+  if (value.state) state.social = value.state;
+  if (value.post) {
+    const posts = state.social.posts.filter((post) => post.id !== value.post.id);
+    state.social.posts = [value.post, ...posts];
+  }
+  if (state.view === "publishing") renderPublishing();
+});
+
 boot();
 
 async function boot() {
-  await refresh();
+  await Promise.all([refresh(), refreshSocial()]);
   render();
+}
+
+async function refreshSocial() {
+  if (!window.leadjaSocial) return;
+  try { state.social = await window.leadjaSocial.state(); } catch { /* The rest of the local app remains available. */ }
 }
 
 async function refresh() {
@@ -79,10 +100,11 @@ async function refresh() {
 function render() {
   if (state.view !== "whatsapp") hideWhatsAppView();
   document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("is-active", button.dataset.view === state.view));
-  document.querySelector("#mobileTitle").textContent = ({ leads: "Leads", search: "Buscar", crm: "CRM", whatsapp: "WhatsApp", settings: "Configurações" })[state.view];
+  document.querySelector("#mobileTitle").textContent = ({ leads: "Leads", search: "Buscar", crm: "CRM", publishing: "Publicações", whatsapp: "WhatsApp", settings: "Configurações" })[state.view];
   if (state.view === "leads") renderLeads();
   if (state.view === "search") renderSearch();
   if (state.view === "crm") renderCrm();
+  if (state.view === "publishing") renderPublishing();
   if (state.view === "whatsapp") renderWhatsApp();
   if (state.view === "settings") renderSettings();
 }
@@ -184,6 +206,90 @@ function renderCrm() {
       toast("Etapa atualizada.");
     });
   });
+}
+
+function renderPublishing() {
+  if (!window.leadjaSocial) {
+    app.innerHTML = `<div class="page">${pageHeading("Publicações", "Conecte suas contas e envie o mesmo vídeo para as redes escolhidas.", "")}<div class="empty-state panel"><div><strong>Disponível no aplicativo para Mac</strong><p>As conexões oficiais e o acesso ao arquivo de vídeo funcionam no LeadJá instalado.</p></div></div></div>`;
+    return;
+  }
+  const accounts = state.social.accounts || [];
+  const posts = state.social.posts || [];
+  const storageReady = socialConfig("instagramStorage")?.configured;
+  const hasKwai = accounts.some((account) => account.provider === "kwai");
+  const privacyOptions = [...new Set(accounts.filter((account) => account.provider === "tiktok").flatMap((account) => account.metadata?.creatorInfo?.privacy_level_options || ["SELF_ONLY"]))];
+  app.innerHTML = `
+    <div class="page publishing-page">
+      ${pageHeading("Publicações", "Conecte as contas uma vez. Depois escolha um vídeo, escreva a descrição e publique nos destinos selecionados.", `<button class="button" data-social-refresh>Atualizar contas</button>`)}
+      <section class="social-connections" aria-label="Contas conectadas">
+        ${socialConnectionCard("meta", "Meta", "Facebook + Instagram", "M", ["facebook", "instagram"], "Conecta as Páginas que você administra e os perfis profissionais vinculados.")}
+        ${socialConnectionCard("tiktok", "TikTok", "Conta de criador", "T", ["tiktok"], "Publicação direta exige o produto Content Posting e a permissão video.publish.")}
+        ${socialConnectionCard("kwai", "Kwai", "Conta de criador", "K", ["kwai"], "A conta precisa autorizar user_info e user_video_publish.")}
+      </section>
+
+      <div class="publishing-layout">
+        <section class="panel composer-panel">
+          <div class="panel-header"><div><h2>Nova publicação</h2><p>O envio só começa quando você confirmar.</p></div><span class="pill ${accounts.length ? "won" : "new"}">${accounts.length} ${accounts.length === 1 ? "conta" : "contas"}</span></div>
+          ${accounts.length ? `
+            <form id="publishForm" class="publish-form">
+              <div class="video-picker ${state.socialVideo ? "has-file" : ""}">
+                <span class="video-picker-icon">${icons.video}</span>
+                <div><strong>${escapeHtml(state.socialVideo?.name || "Escolha um vídeo")}</strong><span>${state.socialVideo ? formatFileSize(state.socialVideo.size) : "MP4, MOV, M4V ou WebM"}</span></div>
+                <button class="button" type="button" id="chooseSocialVideo">${state.socialVideo ? "Trocar" : "Selecionar vídeo"}</button>
+              </div>
+              <label class="field-label">Descrição<textarea class="textarea social-caption" id="socialCaption" name="caption" maxlength="2200" placeholder="Escreva uma descrição que funcione em todas as redes…"></textarea><small><span id="captionCount">0</span>/2200 caracteres</small></label>
+              <fieldset class="target-fieldset"><legend>Publicar em</legend><div class="target-list">
+                ${accounts.map((account) => socialTarget(account, storageReady)).join("")}
+              </div></fieldset>
+              ${accounts.some((account) => account.provider === "instagram") && !storageReady ? `<div class="setup-note"><div><strong>Instagram precisa de uma ponte temporária</strong><p>A API do Instagram busca o vídeo por um endereço público. Configure um bucket público do Supabase; o LeadJá envia, publica e tenta apagar o arquivo temporário.</p></div><button class="button small" type="button" data-social-config="instagramStorage">Configurar ponte</button></div>` : ""}
+              ${privacyOptions.length ? `<label class="field-label">Privacidade no TikTok<select class="select" name="tiktokPrivacy">${privacyOptions.map((value) => `<option value="${escapeAttr(value)}" ${value === "SELF_ONLY" ? "selected" : ""}>${escapeHtml(tiktokPrivacyLabel(value))}</option>`).join("")}</select><small>Apps ainda não auditados pelo TikTok publicam somente como “Somente eu”.</small></label>` : ""}
+              ${hasKwai ? `<div class="kwai-cover-row"><div><strong>Capa do Kwai</strong><span>${escapeHtml(state.socialCover?.name || "O LeadJá tentará gerar uma capa automaticamente. Você também pode escolher um JPG.")}</span></div><button class="button small" type="button" id="chooseSocialCover">${state.socialCover ? "Trocar capa" : "Escolher JPG"}</button></div>` : ""}
+              <div class="publish-options">
+                <label><input type="checkbox" name="shareToFeed" checked /> Mostrar o Reel também no feed do Instagram</label>
+                <label><input type="checkbox" name="promotesOwnBusiness" /> O vídeo promove meu próprio negócio</label>
+                <label><input type="checkbox" name="aiGenerated" /> O vídeo foi gerado por IA</label>
+              </div>
+              <div class="publish-submit"><span id="publishHint">Nada será publicado sem sua confirmação.</span><button class="button accent" type="submit" ${state.socialBusy ? "disabled" : ""}>${state.socialBusy === "publishing" ? "Publicando…" : `${icons.publish} Publicar agora`}</button></div>
+            </form>` : `<div class="empty-state"><div><strong>Conecte sua primeira conta</strong><p>Configure uma rede acima e conclua a autorização na janela oficial para liberar o publicador.</p></div></div>`}
+        </section>
+        <aside class="panel publication-history">
+          <div class="panel-header"><div><h2>Histórico</h2><p>Um resultado separado para cada destino.</p></div></div>
+          <div class="post-history">${posts.length ? posts.map(socialPostItem).join("") : `<div class="column-empty">Nenhuma publicação iniciada.</div>`}</div>
+        </aside>
+      </div>
+    </div>`;
+
+  document.querySelector("[data-social-refresh]")?.addEventListener("click", async () => { await refreshSocial(); renderPublishing(); toast("Contas atualizadas."); });
+  document.querySelectorAll("[data-social-config]").forEach((button) => button.addEventListener("click", () => openSocialConfig(button.dataset.socialConfig)));
+  document.querySelectorAll("[data-social-connect]").forEach((button) => button.addEventListener("click", () => connectSocial(button.dataset.socialConnect)));
+  document.querySelectorAll("[data-social-disconnect]").forEach((button) => button.addEventListener("click", () => disconnectSocial(button.dataset.socialDisconnect)));
+  document.querySelector("#chooseSocialVideo")?.addEventListener("click", chooseSocialVideo);
+  document.querySelector("#chooseSocialCover")?.addEventListener("click", chooseSocialCover);
+  document.querySelector("#socialCaption")?.addEventListener("input", (event) => { document.querySelector("#captionCount").textContent = event.target.value.length; });
+  document.querySelector("#publishForm")?.addEventListener("submit", publishSocialVideo);
+}
+
+function socialConnectionCard(configProvider, title, subtitle, monogram, providers, copy) {
+  const config = socialConfig(configProvider);
+  const accounts = state.social.accounts.filter((account) => providers.includes(account.provider));
+  return `<article class="social-card">
+    <div class="social-card-top"><span class="social-mark ${configProvider}">${monogram}</span><div><strong>${title}</strong><span>${subtitle}</span></div><span class="connection-state ${accounts.length ? "is-connected" : ""}">${accounts.length ? "Conectado" : config?.configured ? "Pronto para conectar" : "Não configurado"}</span></div>
+    <p>${copy}</p>
+    <div class="connected-accounts">${accounts.map((account) => `<div class="connected-account">${account.avatarUrl ? `<img src="${escapeAttr(account.avatarUrl)}" alt="" referrerpolicy="no-referrer" />` : `<span>${escapeHtml(account.label.slice(0, 1))}</span>`}<div><strong>${escapeHtml(account.label)}</strong><small>${escapeHtml(providerLabel(account.provider))}${account.username ? ` · @${escapeHtml(account.username)}` : ""}</small></div><button class="icon-button" data-social-disconnect="${escapeAttr(account.id)}" aria-label="Desconectar ${escapeAttr(account.label)}">${icons.x}</button></div>`).join("")}</div>
+    <div class="social-card-actions"><button class="button small" data-social-config="${configProvider}">${config?.configured ? "Revisar configuração" : "Configurar"}</button><button class="button small primary" data-social-connect="${configProvider}" ${state.socialBusy ? "disabled" : ""}>${state.socialBusy === `connect:${configProvider}` ? "Conectando…" : accounts.length ? "Conectar outra" : "Conectar conta"}</button></div>
+  </article>`;
+}
+
+function socialTarget(account, storageReady) {
+  const unavailable = account.provider === "instagram" && !storageReady;
+  return `<label class="social-target ${unavailable ? "is-unavailable" : ""}"><input type="checkbox" name="accountId" value="${escapeAttr(account.id)}" ${unavailable ? "disabled" : "checked"} /><span class="target-provider ${account.provider}">${providerMonogram(account.provider)}</span><span><strong>${escapeHtml(account.label)}</strong><small>${escapeHtml(providerLabel(account.provider))}${unavailable ? " · configure a ponte" : ""}</small></span><i>${icons.check}</i></label>`;
+}
+
+function socialPostItem(post) {
+  return `<article class="post-item"><div class="post-item-head"><div><strong>${escapeHtml(post.videoName)}</strong><span>${formatDate(post.createdAt)} · ${socialPostStatus(post.status)}</span></div><span class="pill ${post.status === "done" ? "won" : post.status === "error" ? "lost" : post.status === "partial" ? "negotiating" : "new"}">${socialPostStatus(post.status)}</span></div><div class="post-targets">${post.targets.map((target) => {
+    const account = state.social.accounts.find((value) => value.id === target.accountId);
+    return `<div class="post-target"><span class="target-provider ${target.provider}">${providerMonogram(target.provider)}</span><div><strong>${escapeHtml(account?.label || providerLabel(target.provider))}</strong><small>${target.error ? escapeHtml(target.error) : socialTargetStatus(target)}</small>${["uploading", "processing", "publishing"].includes(target.status) ? `<span class="mini-progress"><i style="width:${target.progress}%"></i></span>` : ""}</div><span class="target-result ${target.status}">${target.status === "done" ? "Concluído" : target.status === "error" ? "Falhou" : `${target.progress || 0}%`}</span></div>`;
+  }).join("")}</div></article>`;
 }
 
 function renderWhatsApp() {
@@ -290,6 +396,143 @@ function renderSettings() {
     setTheme(event.target.value);
     toast(`Tema ${event.target.value === "dark" ? "escuro" : "claro"} aplicado.`);
   });
+}
+
+function openSocialConfig(provider) {
+  const config = socialConfig(provider) || { publicConfig: {}, hasSecret: false };
+  const definitions = {
+    meta: {
+      title: "Configurar Meta",
+      copy: "Use um app Business da Meta com Facebook Login e as permissões de publicação. O mesmo acesso conecta suas Páginas e os Instagrams profissionais vinculados.",
+      fields: [
+        ["appId", "App ID", "text", "Ex.: 1234567890"],
+        ["appSecret", "App Secret", "password", config.hasSecret ? "Já salvo — deixe vazio para manter" : "Cole o App Secret"],
+        ["redirectUri", "URL de retorno cadastrada", "url", "https://www.leadja.com.br/oauth/meta"],
+      ],
+      note: "Cadastre exatamente a URL de retorno acima no painel da Meta.",
+    },
+    tiktok: {
+      title: "Configurar TikTok",
+      copy: "Crie um app Desktop no TikTok for Developers, adicione Login Kit e Content Posting API e solicite a permissão video.publish.",
+      fields: [
+        ["clientKey", "Client key", "text", "Cole o Client key"],
+        ["clientSecret", "Client secret", "password", config.hasSecret ? "Já salvo — deixe vazio para manter" : "Cole o Client secret"],
+      ],
+      note: `No TikTok, cadastre esta URL com porta curinga: http://127.0.0.1:*/oauth/tiktok`,
+    },
+    kwai: {
+      title: "Configurar Kwai",
+      copy: "Crie uma aplicação Web na Plataforma Aberta do Kwai e solicite os escopos user_info e user_video_publish.",
+      fields: [
+        ["appId", "App ID", "text", "Cole o App ID"],
+        ["appSecret", "App Secret", "password", config.hasSecret ? "Já salvo — deixe vazio para manter" : "Cole o App Secret"],
+        ["redirectUri", "URL de retorno cadastrada", "url", "https://www.leadja.com.br/oauth/kwai"],
+      ],
+      note: "O esquema e o subdomínio precisam ser iguais aos cadastrados no Kwai.",
+    },
+    instagramStorage: {
+      title: "Ponte temporária do Instagram",
+      copy: "O Instagram não recebe um arquivo local diretamente. Use um bucket público do Supabase Storage: o LeadJá envia o vídeo, entrega o link à Meta e tenta remover o temporário ao terminar.",
+      fields: [
+        ["projectUrl", "URL do projeto Supabase", "url", "https://seu-projeto.supabase.co"],
+        ["bucket", "Bucket público", "text", "Ex.: leadja-temporario"],
+        ["apiKey", "Chave de acesso", "password", config.hasSecret ? "Já salva — deixe vazio para manter" : "Use uma chave com acesso ao bucket"],
+      ],
+      note: "O plano gratuito costuma bastar para uso pessoal; limites e regras continuam sendo os do Supabase.",
+    },
+  };
+  const definition = definitions[provider];
+  if (!definition) return;
+  drawer.hidden = false;
+  scrim.hidden = false;
+  drawer.innerHTML = `
+    <div class="drawer-header"><div><h2>${definition.title}</h2><p>${definition.copy}</p></div><button class="icon-button" data-close-drawer aria-label="Fechar">${icons.x}</button></div>
+    <form id="socialConfigForm" class="social-config-form" data-provider="${provider}">
+      ${definition.fields.map(([key, label, type, placeholder]) => `<label class="field-label">${label}<input class="field" name="${key}" type="${type}" value="${type === "password" ? "" : escapeAttr(config.publicConfig?.[key] || (key === "redirectUri" ? placeholder : ""))}" placeholder="${escapeAttr(placeholder)}" ${type === "password" && config.hasSecret ? "" : "required"} /></label>`).join("")}
+      <div class="setup-note compact"><p>${escapeHtml(definition.note)}</p></div>
+      <div class="drawer-actions"><button class="button" type="button" data-close-drawer>Cancelar</button><button class="button primary" type="submit">Salvar configuração</button></div>
+    </form>`;
+  document.querySelector("#socialConfigForm").addEventListener("submit", saveSocialConfig);
+}
+
+async function saveSocialConfig(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const value = Object.fromEntries(new FormData(form));
+  try {
+    state.social = await window.leadjaSocial.saveConfig(form.dataset.provider, value);
+    await refreshSocial();
+    closeOverlays();
+    renderPublishing();
+    toast("Configuração salva neste Mac.");
+  } catch (error) { toast(error.message); }
+}
+
+async function connectSocial(provider) {
+  state.socialBusy = `connect:${provider}`;
+  renderPublishing();
+  try {
+    state.social = await window.leadjaSocial.connect(provider);
+    await refreshSocial();
+    toast("Conta conectada.");
+  } catch (error) { toast(error.message); }
+  finally { state.socialBusy = ""; renderPublishing(); }
+}
+
+async function disconnectSocial(accountId) {
+  const account = state.social.accounts.find((value) => value.id === accountId);
+  if (!account || !window.confirm(`Desconectar “${account.label}” do publicador? O histórico será preservado.`)) return;
+  try {
+    state.social = await window.leadjaSocial.disconnect(accountId);
+    await refreshSocial();
+    renderPublishing();
+    toast("Conta desconectada.");
+  } catch (error) { toast(error.message); }
+}
+
+async function chooseSocialVideo() {
+  const file = await window.leadjaSocial.chooseVideo();
+  if (!file) return;
+  state.socialVideo = file;
+  renderPublishing();
+}
+
+async function chooseSocialCover() {
+  const file = await window.leadjaSocial.chooseCover();
+  if (!file) return;
+  state.socialCover = file;
+  renderPublishing();
+}
+
+async function publishSocialVideo(event) {
+  event.preventDefault();
+  if (!state.socialVideo) return toast("Escolha o vídeo antes de publicar.");
+  const data = new FormData(event.currentTarget);
+  const accountIds = data.getAll("accountId");
+  if (!accountIds.length) return toast("Selecione ao menos uma conta.");
+  const caption = String(data.get("caption") || "").trim();
+  const names = accountIds.map((id) => state.social.accounts.find((account) => account.id === id)?.label).filter(Boolean);
+  if (!window.confirm(`Publicar “${state.socialVideo.name}” em ${names.length} ${names.length === 1 ? "conta" : "contas"}?`)) return;
+  state.socialBusy = "publishing";
+  renderPublishing();
+  try {
+    await window.leadjaSocial.publish({
+      videoPath: state.socialVideo.path,
+      coverPath: state.socialCover?.path || "",
+      caption,
+      accountIds,
+      tiktokPrivacy: data.get("tiktokPrivacy") || "SELF_ONLY",
+      shareToFeed: data.get("shareToFeed") === "on",
+      promotesOwnBusiness: data.get("promotesOwnBusiness") === "on",
+      aiGenerated: data.get("aiGenerated") === "on",
+    });
+    await refreshSocial();
+    state.socialVideo = null;
+    state.socialCover = null;
+    const last = state.social.posts[0];
+    toast(last?.status === "done" ? "Publicação concluída em todos os destinos." : "Publicação concluída com itens que precisam de atenção.");
+  } catch (error) { toast(error.message); }
+  finally { state.socialBusy = ""; renderPublishing(); }
 }
 
 async function handleClick(event) {
@@ -457,6 +700,13 @@ function kpi(label, value, caption) { return `<div class="kpi"><span>${label}</s
 function hotFinding(stats) { return stats.hot ? `${stats.hot} ${stats.hot === 1 ? "oportunidade está" : "oportunidades estão"} pronta para contato; a lista já começa pelas mais fortes.` : "Seus leads ficam ordenados pelos sinais que mais importam para a sua oferta."; }
 function emptyState(title, copy) { return `<div class="empty-state"><div><strong>${title}</strong><p>${copy}</p><button class="button primary" data-view="search">Fazer uma busca</button></div></div>`; }
 function errorBlock(title, copy) { return `<div class="empty-state"><div><strong>${escapeHtml(title)}</strong><p>${escapeHtml(copy)}</p><button class="button" onclick="location.reload()">Tentar novamente</button></div></div>`; }
+function socialConfig(provider) { return state.social.configs?.find((config) => config.provider === provider); }
+function providerLabel(provider) { return ({ facebook: "Facebook", instagram: "Instagram", tiktok: "TikTok", kwai: "Kwai" })[provider] || provider; }
+function providerMonogram(provider) { return ({ facebook: "f", instagram: "I", tiktok: "T", kwai: "K" })[provider] || "•"; }
+function socialPostStatus(status) { return ({ queued: "Na fila", running: "Em andamento", done: "Concluída", partial: "Atenção", error: "Falhou" })[status] || status; }
+function socialTargetStatus(target) { return ({ queued: "Aguardando", uploading: "Enviando vídeo", processing: "Processando", publishing: "Publicando", done: "Publicado", error: "Falhou" })[target.status] || target.status; }
+function tiktokPrivacyLabel(value) { return ({ PUBLIC_TO_EVERYONE: "Público", MUTUAL_FOLLOW_FRIENDS: "Amigos mútuos", FOLLOWER_OF_CREATOR: "Seguidores", SELF_ONLY: "Somente eu" })[value] || value; }
+function formatFileSize(value) { const bytes = Number(value || 0); return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : bytes >= 1024 ** 2 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`; }
 function crmStages() {
   const saved = Array.isArray(state.dashboard.settings?.crmStages) ? state.dashboard.settings.crmStages : [];
   const defaults = new Map(defaultCrmStages.map((stage) => [stage.key, stage]));
